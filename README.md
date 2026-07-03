@@ -2,6 +2,7 @@
 
 > Multi-agent RAG that **refuses to hallucinate**: a LangGraph pipeline where a Critic agent verifies every answer against the retrieved sources — and retries the search when the evidence is missing. 100% local (Ollama + Chroma), no API keys.
 
+[![CI](https://github.com/fluiz7/grounded-rag/actions/workflows/ci.yml/badge.svg)](https://github.com/fluiz7/grounded-rag/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat&logo=python&logoColor=white)
 ![LangGraph](https://img.shields.io/badge/LangGraph-multi--agent-1C3C3C?style=flat&logo=langchain&logoColor=white)
 ![Ollama](https://img.shields.io/badge/Ollama-local%20LLM-000000?style=flat&logo=ollama&logoColor=white)
@@ -91,6 +92,18 @@ src/
 ├── graph.py    # the LangGraph state machine (Retriever / Answerer / Critic)
 └── cli.py      # ingest & ask commands
 ```
+
+## Testing
+
+The agent pipeline is fully unit-tested **without any LLM server**: a scripted fake chat model and an in-memory vector store drive the LangGraph state machine through its happy path, the critic-rejects-and-rewrites retry loop, and the retry-budget cutoff.
+
+```bash
+pip install -r requirements-dev.txt
+ruff check src tests   # lint
+pytest                 # 9 tests, < 2s, no Ollama needed
+```
+
+CI runs the same lint + tests on Python 3.11 and 3.12 for every push (see badge above).
 
 ## Why local?
 

@@ -34,7 +34,9 @@ The whole loop is a compiled [LangGraph](https://github.com/langchain-ai/langgra
 ollama pull llama3.1
 ollama pull nomic-embed-text
 
-# 2. install
+# 2. install (in a virtualenv)
+python -m venv .venv
+.venv\Scripts\activate          # Windows PowerShell  (Linux/macOS: source .venv/bin/activate)
 pip install -r requirements.txt
 
 # 3. index your PDFs (a file or a whole folder)
@@ -43,6 +45,8 @@ python -m src.cli ingest ./papers
 # 4. ask — answers come with citations
 python -m src.cli ask "What factors drive latency in edge computing under mobility?"
 ```
+
+> ⚠️ Every `python` above must be the **virtualenv's** Python. If you skipped `activate`, prefix commands with `.venv\Scripts\python.exe` (Windows) / `.venv/bin/python` — a bare global `python` will fail with `ModuleNotFoundError: langgraph`.
 
 Example output:
 

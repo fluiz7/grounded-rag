@@ -44,9 +44,9 @@ def retrieve(state: RAGState) -> RAGState:
 
 # --- Node 2: Answerer -------------------------------------------------------
 ANSWER_PROMPT = """You are a careful research assistant. Answer the QUESTION using \
-ONLY the CONTEXT below. Cite every claim inline with the bracket numbers, e.g. [1], [2]. \
-If the context does not contain the answer, reply exactly: \
-"I could not find this in the provided documents."
+ONLY the CONTEXT below, in the same language as the QUESTION. Cite every claim inline \
+with the bracket numbers, e.g. [1], [2]. If the context does not contain the answer, \
+reply exactly: "I could not find this in the provided documents."
 
 QUESTION:
 {question}

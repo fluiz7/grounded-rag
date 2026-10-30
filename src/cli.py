@@ -36,7 +36,11 @@ def main() -> None:
 
     print("\n=== ANSWER " + "=" * 50)
     print(state["answer"])
-    if state.get("critic_error"):
+    if state.get("found") is False:
+        tried = state.get("queries_tried", [])
+        print(f"\n(i) The documents don't contain the answer — searched {len(tried)} time(s): "
+              + " | ".join(tried))
+    elif state.get("critic_error"):
         print("\n(!) Not verified: the critic model returned no verdict, so the answer could not be "
               "checked. Try another RAG_CRITIC_MODEL. Use --verbose to inspect the draft.")
     elif not verified:
@@ -53,6 +57,7 @@ def main() -> None:
         print("\n=== PIPELINE " + "=" * 48)
         print(f"  retrieval rounds : {state.get('attempts', 1)}")
         print(f"  grounded         : {verified}")
+        print(f"  found in docs    : {state.get('found') is not False}")
         for claim in state.get("unsupported", []):
             print(f"  unsupported      : {claim}")
         print(f"  critic verdict   :\n{state.get('critique', '(none)')}")

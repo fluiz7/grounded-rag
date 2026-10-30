@@ -2,7 +2,7 @@
 
     Retriever  ->  Answerer  ->  Critic  --grounded-->  Finalize -> END
         ^                            |
-        |________ not grounded ______|  (Critic reformulates the query and we retry)
+        |________ not grounded ______|  (rewritten query + feedback, then retry)
 
 The Critic is what makes this "agentic" rather than a plain RAG chain: it inspects
 whether the answer is actually supported by the retrieved context and, if not,
@@ -23,19 +23,28 @@ from .config import settings
 from .llm import get_chat, get_vectorstore
 
 REFUSAL = "I could not find this in the provided documents."
+# Language-neutral marker the Answerer emits when the context lacks the answer. A fixed
+# English sentence conflicted with "answer in the question's language": models translate
+# it, the translation no longer matched, and a refusal was mistaken for an uncited answer.
+NOT_FOUND = "NOT_FOUND"
 
 
 class RAGState(TypedDict, total=False):
     question: str          # the user's original question (never mutated)
     query: str             # current search query (Critic may rewrite this)
-    documents: list[Document]
+    queries_tried: list[str]
+    rounds: list[list[Document]]  # hits per retrieval round, best first
+    documents: list[Document]     # merged context shown to the Answerer
     answer: str
+    prev_answer: str       # answer of the previous round, to detect a stuck loop
+    feedback: str          # why the previous answer was rejected, fed back to the Answerer
     draft: str             # last unverified answer, kept when the Critic never approved
-    grounded: bool
+    grounded: bool         # True only when the Critic approved a real answer
+    found: bool            # False when the documents did not contain the answer
+    stalled: bool          # a retry would repeat the same work — stop early
     critique: str
     unsupported: list[str]  # claims the Critic flagged as unsupported
     critic_error: bool     # the Critic produced no verdict at all (infrastructure, not evidence)
-    found: bool            # False when the answer is the refusal (documents lack the answer)
     attempts: int          # number of retrieval rounds so far
 
 
@@ -51,46 +60,82 @@ def _doc_key(d: Document) -> tuple:
     return (d.metadata.get("source"), d.metadata.get("page"), d.page_content)
 
 
+def merge_rounds(rounds: list[list[Document]], cap: int) -> list[Document]:
+    """Interleave hits by rank across rounds (newest round first within a rank), dedupe, cap.
+
+    "Newest round first, then the rest" let rounds 2 and 3 fill a 2 x top_k cap and evict
+    every document from round 1. Interleaving by rank keeps each round's best evidence.
+    """
+    merged, seen = [], set()
+    depth = max((len(r) for r in rounds), default=0)
+    for rank in range(depth):
+        for hits in reversed(rounds):
+            if rank < len(hits):
+                key = _doc_key(hits[rank])
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(hits[rank])
+    return merged[:cap]
+
+
 # --- Node 1: Retriever ------------------------------------------------------
 def retrieve(state: RAGState) -> RAGState:
-    """Search with the current query and MERGE with evidence from earlier rounds.
+    """Search with the current query and merge with the evidence of earlier rounds.
 
     Replacing the documents on every retry would throw away evidence the first round
     already found: if round 1 retrieves half of the support and round 2 the other half,
-    the answer could never be grounded on both. Fresh hits come first (they target what
-    the Critic said was missing); the merged context is capped at 2 x top_k.
+    the answer could never be grounded on both.
     """
     query = state.get("query") or state["question"]
     fresh = get_vectorstore().similarity_search(query, k=settings.top_k)
-
-    merged, seen = [], set()
-    for d in [*fresh, *state.get("documents", [])]:
-        key = _doc_key(d)
-        if key not in seen:
-            seen.add(key)
-            merged.append(d)
-    return {"documents": merged[: 2 * settings.top_k], "attempts": state.get("attempts", 0) + 1}
+    rounds = [*state.get("rounds", []), fresh]
+    return {
+        "rounds": rounds,
+        "documents": merge_rounds(rounds, 2 * settings.top_k),
+        "queries_tried": [*state.get("queries_tried", []), query],
+        "attempts": state.get("attempts", 0) + 1,
+    }
 
 
 # --- Node 2: Answerer -------------------------------------------------------
 ANSWER_PROMPT = """You are a careful research assistant. Answer the QUESTION using \
 ONLY the CONTEXT below, in the same language as the QUESTION. Cite every claim inline \
 with the bracket numbers, e.g. [1], [2]. If the context does not contain the answer, \
-reply exactly: "{refusal}"
-
+reply with exactly {not_found} and nothing else — no citations.
+{feedback}
 QUESTION:
 {question}
 
 CONTEXT:
 {context}
 
-Answer (with [n] citations):"""
+Write the answer in the language the QUESTION is written in, citing sources as [n]. Only the {not_found} marker itself is never translated.
+Answer:"""
+
+FEEDBACK_BLOCK = """
+Your PREVIOUS answer to this question was REJECTED: {reason}
+Write a corrected answer that fixes this. Every claim needs a [n] citation to the CONTEXT.
+"""
+
+
+def is_not_found(answer_text: str) -> bool:
+    """The Answerer declined: the NOT_FOUND marker or the legacy English refusal sentence.
+
+    Quotes, punctuation and bracket citations around the marker are tolerated — told to
+    both "reply NOT_FOUND" and "cite sources as [n]", models do write `NOT_FOUND [1-5]`.
+    """
+    core = re.sub(r"\[[^\]]*\]|[\s\"'`*.!]", "", answer_text)
+    return core == NOT_FOUND or answer_text.strip() == REFUSAL
 
 
 def answer(state: RAGState) -> RAGState:
     context = _format_context(state["documents"])
-    prompt = ANSWER_PROMPT.format(question=state["question"], context=context, refusal=REFUSAL)
-    return {"answer": get_chat().invoke(prompt).content.strip()}
+    reason = state.get("feedback")
+    prompt = ANSWER_PROMPT.format(
+        question=state["question"], context=context, not_found=NOT_FOUND,
+        feedback=FEEDBACK_BLOCK.format(reason=reason) if reason else "",
+    )
+    return {"prev_answer": state.get("answer", ""), "answer": get_chat().invoke(prompt).content.strip()}
 
 
 # --- Node 3: Critic ---------------------------------------------------------
@@ -111,8 +156,33 @@ CONTEXT:
 ANSWER:
 {answer}"""
 
-_CITATION = re.compile(r"\[(\d+)\]")
+REWRITE_PROMPT = """The documents retrieved for the QUESTION below did not contain the answer.
+Queries already tried: {tried}
+Write ONE different search query (keywords, synonyms or a narrower angle) likely to find \
+the answer in a collection of technical PDFs. Reply with the query only.
+
+QUESTION:
+{question}"""
+
+# A citation is a bracket group of small numbers, optionally a list or range: [1], [1, 2],
+# [1-3], [1–3]. Not preceded by a word character (so `buffer[0]` is code, not a citation).
+_CITATION = re.compile(r"(?<![\w\]])\[(\s*\d+(?:\s*[,–-]\s*\d+)*\s*)\]")
 _MARKUP = re.compile(r"[*_`#>]")
+
+
+def cited_sources(answer_text: str) -> list[int]:
+    """Source numbers cited in the text. 4-digit numbers ([2024]) are years, not citations."""
+    numbers: list[int] = []
+    for group in _CITATION.findall(answer_text):
+        for part in group.split(","):
+            bounds = [int(n) for n in re.split(r"\s*[–-]\s*", part.strip()) if n]
+            if any(n >= 1000 for n in bounds):
+                continue
+            if len(bounds) == 2 and bounds[0] <= bounds[1] and bounds[1] - bounds[0] < 50:
+                numbers.extend(range(bounds[0], bounds[1] + 1))
+            else:
+                numbers.extend(bounds)
+    return numbers
 
 
 def check_citations(answer_text: str, n_docs: int) -> str | None:
@@ -121,9 +191,7 @@ def check_citations(answer_text: str, n_docs: int) -> str | None:
     Cheap and LLM-free: an answer with no citations, or citing a source number that was
     never retrieved, cannot be grounded — no need to spend a Critic call to find out.
     """
-    if answer_text.strip() == REFUSAL:
-        return None
-    cited = [int(n) for n in _CITATION.findall(answer_text)]
+    cited = cited_sources(answer_text)
     if not cited:
         return "the answer cites no sources"
     invalid = sorted({n for n in cited if not 1 <= n <= n_docs})
@@ -132,52 +200,108 @@ def check_citations(answer_text: str, n_docs: int) -> str | None:
     return None
 
 
-def parse_verdict(text: str) -> tuple[bool, str | None, list[str]]:
-    """Parse the Critic's reply into (grounded, rewritten_query, unsupported_claims).
+def _json_verdicts(text: str) -> list[dict]:
+    """Every JSON object in `text` that carries a "grounded" key.
 
-    Fail-closed: anything that is not an unambiguous approval counts as NOT grounded.
-    Accepts the JSON format first; falls back to the legacy `GROUNDED:/QUERY:` lines,
-    tolerating markdown (`**GROUNDED:** yes`) and missing spaces (`GROUNDED:yes`).
+    raw_decode from each '{' instead of one greedy regex: a greedy `\\{.*\\}` swallowed any
+    later brace (`(see {ref})`), failed to parse, and silently fell back to prose.
     """
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
+    decoder, found, i = json.JSONDecoder(), [], text.find("{")
+    while i != -1:
         try:
-            data = json.loads(match.group(0))
+            obj, end = decoder.raw_decode(text, i)
         except json.JSONDecodeError:
-            data = None
-        if isinstance(data, dict) and "grounded" in data:
-            grounded = data["grounded"] is True
-            query = str(data.get("query") or "").strip() or None
-            claims = [str(c) for c in data.get("unsupported_claims") or [] if str(c).strip()]
-            # a verdict that approves while listing unsupported claims contradicts itself
-            return (grounded and not claims), query, claims
+            end = i + 1
+        else:
+            if isinstance(obj, dict) and "grounded" in obj:
+                found.append(obj)
+        i = text.find("{", end)
+    return found
 
-    grounded, query = False, None
-    verdict_seen = False
+
+def _legacy_verdict(text: str) -> tuple[bool | None, str | None]:
+    """First `GROUNDED:` line (markdown-tolerant) and the `QUERY:` line, if any."""
+    verdict, query = None, None
     for raw in text.splitlines():
         line = _MARKUP.sub("", raw).strip()
         key, _, value = line.partition(":")
         key, value = key.strip().lower(), value.strip()
-        if key == "grounded" and not verdict_seen:
-            verdict_seen = True  # only the first verdict line counts; prose later is ignored
+        if key == "grounded" and verdict is None:
             # exact "yes" (optionally followed by punctuation) — "yes, partially" is a no
-            grounded = re.fullmatch(r"yes[.!]?", value.lower()) is not None
+            verdict = re.fullmatch(r"yes[.!]?", value.lower()) is not None
         elif key == "query" and value not in ("", "-", "--", "—"):
             query = value
-    return grounded, query, []
+    return verdict, query
+
+
+def parse_verdict(text: str) -> tuple[bool, str | None, list[str]]:
+    """Parse the Critic's reply into (grounded, rewritten_query, unsupported_claims).
+
+    Fail-closed:
+    - fields are type-checked (Ollama's JSON mode guarantees syntax, not a schema);
+      a malformed verdict is a rejection, never a crash;
+    - if the reply contains several verdicts (JSON and/or a `GROUNDED:` line), it is an
+      approval only if ALL of them approve;
+    - approving while listing unsupported claims contradicts itself -> rejection.
+    """
+    verdicts: list[bool] = []
+    query: str | None = None
+    claims: list[str] = []
+
+    for data in _json_verdicts(text):
+        ok = data["grounded"] is True
+        raw_claims = data.get("unsupported_claims", [])
+        if isinstance(raw_claims, str):
+            raw_claims = [raw_claims]
+        if isinstance(raw_claims, list) and all(isinstance(c, str) for c in raw_claims):
+            claims += [c.strip() for c in raw_claims if c.strip()]
+        elif raw_claims is not None:
+            ok = False  # unsupported_claims of a nonsensical type: malformed verdict
+        q = data.get("query")
+        if isinstance(q, str) and q.strip() and query is None:
+            query = q.strip()
+        verdicts.append(ok)
+
+    legacy, legacy_query = _legacy_verdict(text)
+    if legacy is not None:
+        verdicts.append(legacy)
+    query = query or legacy_query
+
+    grounded = bool(verdicts) and all(verdicts) and not claims
+    return grounded, query, claims
+
+
+def _rewrite_query(state: RAGState) -> str | None:
+    tried = state.get("queries_tried", [])
+    out = get_chat().invoke(REWRITE_PROMPT.format(question=state["question"], tried=tried)).content
+    query = out.strip().strip("\"'").strip()
+    return query if query and query not in tried else None
 
 
 def critic(state: RAGState) -> RAGState:
     docs = state["documents"]
-    if state["answer"].strip() == REFUSAL:
-        # A refusal asserts nothing, so there is nothing to verify. Asking the Critic anyway
-        # made it flag the question's own topic as an "unsupported claim" and retry for nothing.
-        return {"grounded": True, "found": False, "unsupported": [],
-                "critique": "answer is the refusal — no claims to verify"}
+    budget_left = state.get("attempts", 0) < settings.max_retries + 1
+
+    if is_not_found(state["answer"]):
+        # Nothing to verify — but "not found" in round 1 may just mean the first search
+        # missed. Rewrite the query and search again instead of ending the corrective loop.
+        new_query = _rewrite_query(state) if budget_left else None
+        return {"grounded": False, "found": False, "unsupported": [], "feedback": "",
+                "stalled": budget_left and new_query is None,
+                "query": new_query or state.get("query") or state["question"],
+                "critique": "answer was NOT_FOUND"
+                            + (f" — retrying with query: {new_query}" if new_query else "")}
+
+    if state["answer"] == state.get("prev_answer"):
+        # identical answer after feedback: a deterministic model won't change it — stop
+        return {"grounded": False, "found": True, "stalled": True, "unsupported": [],
+                "critique": "the answerer repeated a rejected answer verbatim — stopping"}
+
     problem = check_citations(state["answer"], len(docs))
     if problem:
-        return {"grounded": False, "critique": f"citation check failed: {problem}",
-                "unsupported": [], "query": state.get("query") or state["question"]}
+        return {"grounded": False, "found": True, "unsupported": [], "feedback": problem,
+                "critique": f"citation check failed: {problem}",
+                "query": state.get("query") or state["question"]}
 
     context = _format_context(docs)
     out = get_chat(json_mode=True).invoke(
@@ -186,12 +310,15 @@ def critic(state: RAGState) -> RAGState:
     if not out.strip():
         # An empty reply is a broken critic, not missing evidence: say so, and don't burn
         # retries — asking the same model again won't fix it.
-        return {"grounded": False, "critic_error": True, "unsupported": [],
+        return {"grounded": False, "found": True, "critic_error": True, "unsupported": [],
                 "critique": "critic returned no output (e.g. a reasoning model that spent its "
                             "whole token budget thinking) — answer left unverified"}
     grounded, new_query, claims = parse_verdict(out)
+    feedback = "" if grounded else (
+        "these claims are not supported by the context: " + "; ".join(claims) if claims
+        else "the verifier found claims not supported by the context")
     return {"grounded": grounded, "found": True, "critique": out.strip(), "unsupported": claims,
-            "query": new_query or state["question"]}
+            "feedback": feedback, "query": new_query or state["question"]}
 
 
 # --- Node 4: Finalize -------------------------------------------------------
@@ -199,13 +326,16 @@ def finalize(state: RAGState) -> RAGState:
     """Never hand out an answer the Critic did not approve."""
     if state.get("grounded"):
         return {}
+    if state.get("found") is False:
+        return {"answer": REFUSAL}
     return {"draft": state.get("answer", ""), "answer": REFUSAL}
 
 
 # --- Routing ----------------------------------------------------------------
 def route_after_critic(state: RAGState) -> str:
-    """Stop if grounded or if we've exhausted the retry budget; otherwise retry."""
-    if state.get("grounded") or state.get("critic_error") or state.get("attempts", 0) >= settings.max_retries + 1:
+    """Stop when grounded, when retrying can't help, or when the budget is spent."""
+    if (state.get("grounded") or state.get("critic_error") or state.get("stalled")
+            or state.get("attempts", 0) >= settings.max_retries + 1):
         return "finalize"
     return "retrieve"
 

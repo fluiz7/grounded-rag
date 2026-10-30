@@ -67,13 +67,14 @@ Add `--verbose` to see the critic's verdict and how many retrieval rounds were u
 
 ## How the Critic loop works
 
-1. The Answerer must cite every claim with `[n]` markers, or reply with the fixed refusal sentence.
-2. **Deterministic citation check** (no LLM call): an answer with no citations, or citing a source number that was never retrieved (`[7]` with 5 sources), is rejected immediately.
-3. The Critic re-reads *question + context + answer* and returns a **JSON verdict** (`{"grounded", "unsupported_claims", "query"}`, decoded in Ollama's JSON mode). The parser is **fail-closed**: an empty reply, prose without a verdict, `yes, partially`, or an approval that still lists unsupported claims all count as *not grounded*.
-4. When the verdict is *no*, the graph routes back to the Retriever with the Critic's rewritten query — up to `RAG_MAX_RETRIES` times (default 2). **Evidence accumulates across rounds** (deduplicated), so support split between two searches can still ground one answer.
-5. **An answer the Critic never approved is never returned as the answer.** The pipeline replies with the refusal and keeps the rejected text as an inspectable `draft` (`--verbose`).
+1. The Answerer must cite every claim with `[n]` markers (`[1]`, `[1, 2]`, `[1-3]`), or reply with the language-neutral marker `NOT_FOUND`.
+2. **Deterministic citation check** (no LLM call): an answer with no citations, or citing a source number that was never retrieved (`[7]` with 5 sources), is rejected immediately. Indexing such as `buffer[0]` and years such as `[2024]` are not mistaken for citations.
+3. The Critic re-reads *question + context + answer* and returns a **JSON verdict** (`{"grounded", "unsupported_claims", "query"}`, decoded in Ollama's JSON mode). The parser is **fail-closed**: every JSON object in the reply is decoded and type-checked, an approval requires *every* verdict in the reply to approve, and an empty reply, prose without a verdict, `yes, partially` or an approval that still lists unsupported claims all count as *not grounded*.
+4. When the verdict is *no*, the graph routes back to the Retriever with the Critic's rewritten query, and **the rejection reason is fed back to the Answerer** — up to `RAG_MAX_RETRIES` times (default 2). If the Answerer repeats a rejected answer verbatim, the loop stops instead of burning the budget.
+5. **Evidence accumulates across rounds**, interleaved by rank (deduplicated, capped at 2 × top_k), so each round's best evidence survives later rounds.
+6. **An answer the Critic never approved is never returned as the answer.** The pipeline replies with the refusal and keeps the rejected text as an inspectable `draft` (`--verbose`).
 
-A refusal asserts nothing, so it skips the Critic and ends the run (exit code 4). If the Critic model returns no output at all, the run stops with an explicit *critic failure* instead of disguising it as missing evidence.
+`NOT_FOUND` doesn't end the run either: a first search can simply miss, so the query is **rewritten and the search retried**. Only when every round comes back empty does the run end as *not found* (exit 4, `grounded=False`, `found=False`). If the Critic model returns no output at all, the run stops with an explicit *critic failure* instead of disguising it as missing evidence.
 
 This is a minimal, readable implementation of the *corrective RAG* idea (generate → verify → refine retrieval) — see [`src/graph.py`](src/graph.py).
 
@@ -105,19 +106,19 @@ Everything is tunable via environment variables (see [`src/config.py`](src/confi
 src/
 ├── config.py   # env-driven settings
 ├── llm.py      # Ollama + Chroma factories (single place to swap backends)
-├── ingest.py   # PDF -> chunks -> embeddings -> Chroma (idempotent: re-ingesting never duplicates)
+├── ingest.py   # PDF -> chunks -> Chroma; re-ingesting replaces a file's chunks (no duplicates, no stale versions)
 ├── graph.py    # the LangGraph state machine (Retriever / Answerer / Critic)
 └── cli.py      # ingest & ask commands
 ```
 
 ## Testing
 
-The agent pipeline is fully unit-tested **without any LLM server**: a scripted fake chat model and an in-memory vector store drive the LangGraph state machine. [`tests/test_adversarial.py`](tests/test_adversarial.py) pins every failure found in an adversarial review — inverted verdicts, markdown-formatted verdicts, phantom citations, discarded evidence, unverified answers leaking out, duplicated chunks, empty critic output — so none of them can come back.
+The agent pipeline is fully unit-tested **without any LLM server**: a scripted fake chat model and an in-memory vector store drive the LangGraph state machine. [`tests/test_adversarial.py`](tests/test_adversarial.py) and [`tests/test_review_round2.py`](tests/test_review_round2.py) pin every failure found in two adversarial reviews — inverted verdicts, markdown-formatted verdicts, phantom citations, discarded evidence, unverified answers leaking out, duplicated chunks, empty critic output — so none of them can come back.
 
 ```bash
 pip install -r requirements-dev.txt
 ruff check src tests   # lint
-pytest                 # 40 tests, ~3s, no Ollama needed
+pytest                 # 74 tests, ~3s, no Ollama needed
 ```
 
 CI runs the same lint + tests on Python 3.11 and 3.12 for every push (see badge above).

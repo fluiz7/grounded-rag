@@ -2,9 +2,12 @@
 
 Accepts a single PDF or a folder (searched recursively).
 
-Idempotent: every chunk gets a deterministic id derived from its file, page, position
-and content, and Chroma upserts by id. Re-running `ingest` on the same folder therefore
-does not duplicate chunks — duplicates would otherwise crowd the top-k retrieval slots.
+Re-ingesting is safe:
+- `source` is the PDF's path relative to the folder being ingested, so two files with the
+  same name in different subfolders (2024/paper.pdf, 2025/paper.pdf) stay distinct;
+- each file REPLACES its previous chunks: re-running on an unchanged folder changes
+  nothing, and re-running after editing a PDF leaves no stale chunks from the old version
+  mixed into retrieval.
 """
 import hashlib
 from pathlib import Path
@@ -24,20 +27,35 @@ def chunk_id(doc: Document) -> str:
     return hashlib.sha1(key.encode("utf-8")).hexdigest()
 
 
-def load_pdf(pdf: Path) -> list[Document]:
+def load_pdf(pdf: Path, source: str | None = None) -> list[Document]:
     """One Document per page. `page` is 1-based — the number a reader sees in the PDF
     viewer — so a citation like "page 9" can be checked by opening page 9."""
     reader = PdfReader(str(pdf))
+    src = source or pdf.name
     return [
-        Document(page_content=page.extract_text() or "", metadata={"source": pdf.name, "page": i})
+        Document(page_content=page.extract_text() or "", metadata={"source": src, "page": i})
         for i, page in enumerate(reader.pages, start=1)
     ]
 
 
+def replace_source(store, source: str, chunks: list[Document]) -> None:
+    """Delete every chunk previously stored for `source`, then add `chunks`."""
+    old = store.get(where={"source": source}).get("ids", [])
+    if old:
+        store.delete(ids=old)
+    if chunks:
+        ids = [chunk_id(c) for c in chunks]
+        unique = dict(zip(ids, chunks))  # identical chunk twice in one file -> stored once
+        store.add_documents(list(unique.values()), ids=list(unique.keys()))
+
+
 def ingest(path: str) -> tuple[int, int]:
-    """Returns (num_pdfs, num_chunks) upserted into the vector store."""
+    """Returns (num_pdfs, num_chunks) stored."""
     p = Path(path)
-    pdfs = [p] if p.suffix.lower() == ".pdf" else sorted(p.glob("**/*.pdf"))
+    if p.suffix.lower() == ".pdf":
+        pdfs = [(p, p.name)]
+    else:
+        pdfs = [(f, f.relative_to(p).as_posix()) for f in sorted(p.glob("**/*.pdf"))]
     if not pdfs:
         raise SystemExit(f"No PDFs found at: {path}")
 
@@ -47,11 +65,11 @@ def ingest(path: str) -> tuple[int, int]:
         add_start_index=True,  # makes identical text at different offsets distinct
     )
 
-    chunks = []
-    for pdf in pdfs:
-        pages = [p for p in load_pdf(pdf) if p.page_content.strip()]  # skip image-only pages
-        chunks.extend(splitter.split_documents(pages))
-
-    if chunks:
-        get_vectorstore().add_documents(chunks, ids=[chunk_id(c) for c in chunks])
-    return len(pdfs), len(chunks)
+    store = get_vectorstore()
+    total = 0
+    for pdf, source in pdfs:
+        pages = [pg for pg in load_pdf(pdf, source) if pg.page_content.strip()]  # skip image-only pages
+        chunks = splitter.split_documents(pages)
+        replace_source(store, source, chunks)
+        total += len(chunks)
+    return len(pdfs), total

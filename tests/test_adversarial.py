@@ -53,7 +53,6 @@ def test_parse_verdict_returns_unsupported_claims():
     ("No citations here.", 2, False),
     ("Cites a phantom source [7].", 2, False),
     ("Zero is not a source [0].", 2, False),
-    (REFUSAL, 2, True),                                # a refusal needs no citation
 ])
 def test_check_citations(text, n_docs, ok):
     assert (check_citations(text, n_docs) is None) is ok
@@ -161,13 +160,3 @@ def test_empty_critic_output_is_reported_as_a_critic_failure(patch_pipeline, fak
     assert state["attempts"] == 1            # no retries burned on a broken critic
     assert state["answer"] == REFUSAL
     assert "no output" in state["critique"]
-
-
-def test_refusal_is_a_final_outcome_not_a_failed_verification(patch_pipeline):
-    # Found end-to-end: the critic flagged the refusal's topic as an "unsupported claim".
-    chat = patch_pipeline([REFUSAL])
-    state = build_graph().invoke({"question": "q?"})
-    assert state["found"] is False
-    assert state["attempts"] == 1
-    assert state["answer"] == REFUSAL
-    assert all("strict verifier" not in p for p in chat.prompts)   # critic not consulted

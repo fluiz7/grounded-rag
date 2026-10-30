@@ -8,6 +8,8 @@ import os
 class Settings:
     # Ollama (local, no API key needed)
     chat_model: str = os.getenv("RAG_CHAT_MODEL", "llama3.1")
+    # Critic model: defaults to the chat model; a different one avoids self-grading bias
+    critic_model: str = os.getenv("RAG_CRITIC_MODEL", os.getenv("RAG_CHAT_MODEL", "llama3.1"))
     embed_model: str = os.getenv("RAG_EMBED_MODEL", "nomic-embed-text")
     ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 

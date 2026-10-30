@@ -3,6 +3,8 @@
     python -m src.cli ingest ./papers          # index PDFs
     python -m src.cli ask "your question"      # ask with citations
     python -m src.cli ask "..." --verbose      # also show critic verdict & retries
+
+Exit codes: 0 verified answer · 3 answer could not be verified · 4 documents don't contain the answer.
 """
 import argparse
 
@@ -30,9 +32,19 @@ def main() -> None:
 
     graph = build_graph()
     state = graph.invoke({"question": args.question})
+    verified = bool(state.get("grounded"))
 
     print("\n=== ANSWER " + "=" * 50)
     print(state["answer"])
+    if state.get("critic_error"):
+        print("\n(!) Not verified: the critic model returned no verdict, so the answer could not be "
+              "checked. Try another RAG_CRITIC_MODEL. Use --verbose to inspect the draft.")
+    elif not verified:
+        print(
+            f"\n(!) Not verified: the critic approved no answer in {state.get('attempts', 1)} "
+            "retrieval round(s), so none is given. Use --verbose to inspect the unverified draft."
+        )
+
     print("\n=== SOURCES " + "=" * 49)
     for i, d in enumerate(state.get("documents", []), start=1):
         print(f"  [{i}] {d.metadata.get('source', '?')} — page {d.metadata.get('page', '?')}")
@@ -40,8 +52,17 @@ def main() -> None:
     if args.verbose:
         print("\n=== PIPELINE " + "=" * 48)
         print(f"  retrieval rounds : {state.get('attempts', 1)}")
-        print(f"  grounded         : {state.get('grounded')}")
+        print(f"  grounded         : {verified}")
+        for claim in state.get("unsupported", []):
+            print(f"  unsupported      : {claim}")
         print(f"  critic verdict   :\n{state.get('critique', '(none)')}")
+        if state.get("draft"):
+            print("\n=== UNVERIFIED DRAFT (do not trust) " + "=" * 25)
+            print(state["draft"])
+
+    if state.get("found") is False:
+        raise SystemExit(4)
+    raise SystemExit(0 if verified else 3)
 
 
 if __name__ == "__main__":

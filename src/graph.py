@@ -14,10 +14,10 @@ the refusal and keeps the unverified text in `draft` for inspection.
 """
 import json
 import re
-from typing import List, TypedDict
+from typing import TypedDict
 
 from langchain_core.documents import Document
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import END, START, StateGraph
 
 from .config import settings
 from .llm import get_chat, get_vectorstore
@@ -28,18 +28,18 @@ REFUSAL = "I could not find this in the provided documents."
 class RAGState(TypedDict, total=False):
     question: str          # the user's original question (never mutated)
     query: str             # current search query (Critic may rewrite this)
-    documents: List[Document]
+    documents: list[Document]
     answer: str
     draft: str             # last unverified answer, kept when the Critic never approved
     grounded: bool
     critique: str
-    unsupported: List[str]  # claims the Critic flagged as unsupported
+    unsupported: list[str]  # claims the Critic flagged as unsupported
     critic_error: bool     # the Critic produced no verdict at all (infrastructure, not evidence)
     found: bool            # False when the answer is the refusal (documents lack the answer)
     attempts: int          # number of retrieval rounds so far
 
 
-def _format_context(docs: List[Document]) -> str:
+def _format_context(docs: list[Document]) -> str:
     return "\n\n".join(
         f"[{i + 1}] (source: {d.metadata.get('source', '?')}, "
         f"page {d.metadata.get('page', '?')})\n{d.page_content}"

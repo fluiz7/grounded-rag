@@ -9,9 +9,9 @@ does not duplicate chunks — duplicates would otherwise crowd the top-k retriev
 import hashlib
 from pathlib import Path
 
-from pypdf import PdfReader
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from pypdf import PdfReader
 
 from .config import settings
 from .llm import get_vectorstore

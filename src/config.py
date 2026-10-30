@@ -1,7 +1,7 @@
 """Central configuration. Everything is overridable via environment variables,
 so the demo runs out-of-the-box but stays easy to tune."""
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)

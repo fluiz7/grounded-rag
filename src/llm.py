@@ -1,7 +1,7 @@
 """Thin factory around the local Ollama models and the Chroma vector store.
 Kept in one place so swapping the backend (e.g. to a remote LLM) is a one-file change."""
-from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_chroma import Chroma
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 
 from .config import settings
 

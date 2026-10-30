@@ -1,7 +1,7 @@
 """Unit tests for the multi-agent pipeline (no Ollama required)."""
 from langchain_core.documents import Document
-from src.graph import REFUSAL, _format_context, build_graph, critic, route_after_critic
 
+from src.graph import REFUSAL, _format_context, build_graph, critic, route_after_critic
 
 # --- pure helpers -----------------------------------------------------------
 

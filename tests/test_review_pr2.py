@@ -23,12 +23,14 @@ OK = '{"grounded": true, "unsupported_claims": [], "query": ""}'
 
 @pytest.mark.parametrize("text, expected", [
     ("Does distance explain the latency observed under vehicle mobility?", "English"),
-    ("What factors drive latency in edge computing under mobility?", "English"),
+    # one exclusive word only ("what"): silence, and the prompt falls back to the generic wording
+    ("What factors drive latency in edge computing under mobility?", None),
     ("A distância explica a latência observada com mobilidade veicular?", "Portuguese"),
     ("Quais fatores determinam a latência em computação de borda com mobilidade?", "Portuguese"),
     ("Qual é a relação entre a força do sinal e a latência?", "Portuguese"),
     ("Die Latenz wird hauptsächlich durch die Netzwerkqualität beeinflusst [7].", "German"),
-    ("¿Qué factores determinan la latencia?", "Spanish"),
+    ("¿Qué factores determinan la latencia?", None),                # "qué" alone: unsure
+    ("¿Cuáles son los factores que determinan la latencia de la red?", "Spanish"),
     ("Latency?", None),                                  # too little evidence: no guess
     ("距離は遅延を説明しますか？", None),                  # not Latin: the script check's job
 ])

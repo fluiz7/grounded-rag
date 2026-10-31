@@ -13,23 +13,29 @@ _SCRIPT_GROUPS = {"HIRAGANA": "CJK", "KATAKANA": "CJK"}
 _SCRIPTS = ("LATIN", "CJK", "HIRAGANA", "KATAKANA", "HANGUL", "CYRILLIC", "GREEK", "ARABIC",
             "HEBREW", "DEVANAGARI", "THAI")
 
-# Function words: frequent, topic-independent. Overlaps (de, la, en) only add noise
-# to several languages at once; the decision needs a clear winner.
+# Function words EXCLUSIVE to one language: frequent and topic-independent. A word that
+# is a function word in two of them ("a", "as", "no", "de", "que", "se", "mais", "was",
+# "in", "an", "um", "à"…) is left out everywhere — it would vote for the wrong language
+# ("Does a handover…" read as Portuguese). The test suite pins the collisions.
 _FUNCTION_WORDS = {
-    "Portuguese": "o a os as de do da dos das em no na nos nas um uma com por para que não é e "
-                  "se mais como qual quais entre sua seu ao à pela pelo são também foi",
-    "English": "the of and to in is are was what which does do how with for on by not that "
-               "this between an it be from also",
-    "Spanish": "el la los las de del en y que es con por para un una no qué cuál cómo entre lo "
-               "su son también fue",
+    "Portuguese": "os da dos das em na nas uma com não é qual quais sua seu ao pela pelo são "
+                  "também foi isso essa esse onde muito há pelos pelas quando",
+    "English": "the of and to is are were what which does did how why where who with for by "
+               "not that this between it be from also has have can at or its these",
+    "Spanish": "el los las del y es con una qué cuál cómo lo su son también fue muy pero "
+               "está hay esto cuando",
     "German": "der die das und ist nicht mit von zu den dem ein eine wird durch auf für im "
-              "sich auch wie",
-    "French": "le la les de des du et est un une que qui pas pour avec sur dans quel quels "
-              "aussi été",
+              "sich auch wie bei werden oder zwischen nach",
+    "French": "le les des du et est une qui pas pour avec sur dans quel quels aussi été ce "
+              "cette sont au aux ces",
 }
 _WORDS = {lang: set(words.split()) for lang, words in _FUNCTION_WORDS.items()}
-# letters that occur in one of these languages only
-_LETTERS = {"Portuguese": "ãõ", "Spanish": "ñ¿¡", "German": "ßäöü", "French": "èùœë"}
+# letters that occur in one of these languages only — counted in lowercase words only:
+# "São Paulo" and "Fundão" are names an English answer legitimately contains
+_LETTERS = {"Portuguese": "ãõ", "Spanish": "ñ", "German": "ßäöü", "French": "èùœë"}
+# accented endings no other of these languages writes ("latência" vs latence/latencia/
+# latency): technical questions are mostly content words, and these carry the signal
+_SUFFIXES = {"Portuguese": ("ência", "ância", "ção", "ções", "ões"), "Spanish": ("ción", "ciones")}
 
 
 def dominant_script(text: str) -> str | None:
@@ -45,18 +51,22 @@ def dominant_script(text: str) -> str | None:
     return max(counts, key=counts.get) if counts else None
 
 
-def detect_language(text: str) -> str | None:
+def detect_language(text: str, min_score: int = 2) -> str | None:
     """English name of the language of a Latin-script `text`, or None when unsure.
 
-    Unsure = fewer than 2 points of evidence, or a tie: a wrong guess would make the
-    pipeline reject correct answers, so silence is the safe answer.
+    Unsure = fewer than `min_score` points, or a winner without twice the runner-up's
+    points. Naming the language in a prompt can use the default; REJECTING an answer
+    should ask for more (`min_score=3`): a wrong guess there blocks a correct answer.
     """
     if dominant_script(text) != "LATIN":
         return None
-    tokens = re.findall(r"[^\W\d_]+", text.casefold())
-    scores = {lang: sum(t in words for t in tokens) for lang, words in _WORDS.items()}
+    tokens = re.findall(r"[^\W\d_]+", text)
+    scores = {lang: sum(t.casefold() in words for t in tokens) for lang, words in _WORDS.items()}
+    lowercase = "".join(t for t in tokens if not t[0].isupper())
     for lang, letters in _LETTERS.items():
-        scores[lang] += 2 * sum(text.casefold().count(c) for c in letters)
+        scores[lang] += sum(lowercase.count(c) for c in letters)
+    for lang, endings in _SUFFIXES.items():
+        scores[lang] += sum(t.casefold().endswith(endings) for t in tokens)
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
     (best, top), (_, second) = ranked[0], ranked[1]
-    return best if top >= 2 and top > second else None
+    return best if top >= min_score and top >= 2 * second else None

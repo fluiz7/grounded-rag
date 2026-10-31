@@ -193,7 +193,7 @@ QUESTION:
 {question}"""
 
 CORPUS_HINT = """The documents are written in {language}: write the query in {language}, \
-even though the QUESTION is not — search matches the documents' words.
+whatever the QUESTION's language — search matches the documents' words.
 """
 
 # A bracket group of numbers, optionally a list or range: [1], [1, 2], [1-3], [1–3].
@@ -248,20 +248,26 @@ def check_citations(answer_text: str, n_docs: int) -> str | None:
     return None
 
 
+# "…", “…”, «…» — not '…': apostrophes ("d'impact", "don't") would pair up
+_QUOTED = re.compile(r'"[^"\n]*"|“[^”\n]*”|«[^»\n]*»')
+
+
 def check_language(answer_text: str, question: str) -> str | None:
     """Deterministic: the answer must be in the question's language.
 
     Seen end-to-end: qwen2.5 "translated" English slides into Chinese for an English
     question (the Critic approved it), and answered Portuguese questions in English or
     German. Two layers: the writing system (always decidable), then the language among
-    pt/en/es/de/fr — enforced only when BOTH sides are detected with confidence.
+    pt/en/es/de/fr — enforced only when BOTH sides are detected with confidence, and the
+    answer with more evidence than naming a language needs: rejecting a correct answer
+    is the costly mistake. Quoted text is the source's words (a slide title), not the answer's.
     """
-    text = _CODE_SPAN.sub(" ", _CITATION.sub(" ", answer_text))
+    text = _QUOTED.sub(" ", _CODE_SPAN.sub(" ", _CITATION.sub(" ", answer_text)))
     q, a = dominant_script(question), dominant_script(text)
     if q and a and q != a:
         return (f"the answer is written in another script ({a}) than the question ({q}); "
                 "write it in the QUESTION's language")
-    q_lang, a_lang = detect_language(question), detect_language(text)
+    q_lang, a_lang = detect_language(question), detect_language(text, min_score=3)
     if q_lang and a_lang and q_lang != a_lang:
         return f"the answer is in {a_lang}, but the question is in {q_lang}; write it in {q_lang}"
     return None
@@ -357,9 +363,13 @@ def _rewrite_query(state: RAGState) -> str | None:
     # the retrieved documents show the collection's language: a Portuguese question over
     # English PDFs was rewritten into more Portuguese queries, which the embedder ranks low.
     # Named, not shown: an excerpt of the slides did not change the model's language.
+    # Only when the question's language is KNOWN to differ (or its script does): an
+    # undetected English question must not be told it "is not" in English.
     docs_lang = detect_language(" ".join(d.page_content for d in state.get("documents", [])))
-    hint = (CORPUS_HINT.format(language=docs_lang)
-            if docs_lang and docs_lang != detect_language(state["question"]) else "")
+    q_lang = detect_language(state["question"])
+    q_script = dominant_script(state["question"])
+    differs = (q_lang and q_lang != docs_lang) or q_script not in (None, "LATIN")
+    hint = CORPUS_HINT.format(language=docs_lang) if docs_lang and differs else ""
     out = get_chat().invoke(
         REWRITE_PROMPT.format(question=state["question"], tried=tried, corpus_hint=hint)
     ).content
@@ -395,7 +405,7 @@ def critic(state: RAGState) -> RAGState:
     if problem:
         return {"grounded": False, "found": True, "unsupported": [], "feedback": problem,
                 "draft": state["answer"],
-                "critique": f"citation check failed: {problem}",
+                "critique": f"deterministic pre-check failed: {problem}",
                 "query": state.get("query") or state["question"]}
 
     context = _format_context(docs)

@@ -37,6 +37,8 @@ class RAGState(TypedDict, total=False):
     documents: list[Document]     # merged context shown to the Answerer
     answer: str
     prev_answer: str       # answer of the previous round, to detect a stuck loop
+    answered_docs: list    # evidence the current answer was written from...
+    prev_answered_docs: list  # ...and the evidence behind the previous one
     feedback: str          # why the previous answer was rejected, fed back to the Answerer
     draft: str             # last unverified answer, kept when the Critic never approved
     grounded: bool         # True only when the Critic approved a real answer
@@ -135,7 +137,12 @@ def answer(state: RAGState) -> RAGState:
         question=state["question"], context=context, not_found=NOT_FOUND,
         feedback=FEEDBACK_BLOCK.format(reason=reason) if reason else "",
     )
-    return {"prev_answer": state.get("answer", ""), "answer": get_chat().invoke(prompt).content.strip()}
+    return {
+        "prev_answer": state.get("answer", ""),
+        "prev_answered_docs": state.get("answered_docs", []),
+        "answered_docs": [_doc_key(d) for d in state["documents"]],
+        "answer": get_chat().invoke(prompt).content.strip(),
+    }
 
 
 # --- Node 3: Critic ---------------------------------------------------------
@@ -164,24 +171,32 @@ the answer in a collection of technical PDFs. Reply with the query only.
 QUESTION:
 {question}"""
 
-# A citation is a bracket group of small numbers, optionally a list or range: [1], [1, 2],
-# [1-3], [1–3]. Not preceded by a word character (so `buffer[0]` is code, not a citation).
-_CITATION = re.compile(r"(?<![\w\]])\[(\s*\d+(?:\s*[,–-]\s*\d+)*\s*)\]")
+# A bracket group of numbers, optionally a list or range: [1], [1, 2], [1-3], [1–3].
+# No lookbehind: a citation may follow a word (`quality[1]`) or another citation
+# (`[1][7]` — the second group must be checked too, or a phantom source slips through).
+_CITATION = re.compile(r"\[(\s*\d+(?:\s*[,–-]\s*\d+)*\s*)\]")
+_CODE_SPAN = re.compile(r"`[^`\n]*`")
 _MARKUP = re.compile(r"[*_`#>]")
 
 
 def cited_sources(answer_text: str) -> list[int]:
-    """Source numbers cited in the text. 4-digit numbers ([2024]) are years, not citations."""
+    """Source numbers cited in the text.
+
+    Whether a bracket group is a citation is decided by its CONTENT, not by what precedes
+    it: source numbers start at 1 and are small, so a group containing 0 (`buffer[0]`, the
+    interval `[0, 1]`) or a 4-digit number (`[2024]`) is not a citation. Inline code is ignored.
+    """
     numbers: list[int] = []
-    for group in _CITATION.findall(answer_text):
+    for group in _CITATION.findall(_CODE_SPAN.sub(" ", answer_text)):
+        flat: list[int] = []
         for part in group.split(","):
             bounds = [int(n) for n in re.split(r"\s*[–-]\s*", part.strip()) if n]
-            if any(n >= 1000 for n in bounds):
-                continue
-            if len(bounds) == 2 and bounds[0] <= bounds[1] and bounds[1] - bounds[0] < 50:
-                numbers.extend(range(bounds[0], bounds[1] + 1))
+            if len(bounds) == 2 and 0 < bounds[0] <= bounds[1] and bounds[1] - bounds[0] < 50:
+                flat.extend(range(bounds[0], bounds[1] + 1))
             else:
-                numbers.extend(bounds)
+                flat.extend(bounds)
+        if flat and all(0 < n < 1000 for n in flat):
+            numbers.extend(flat)
     return numbers
 
 
@@ -194,14 +209,27 @@ def check_citations(answer_text: str, n_docs: int) -> str | None:
     cited = cited_sources(answer_text)
     if not cited:
         return "the answer cites no sources"
+    # seen end-to-end from qwen2.5: an "answer" that is only `[4]` — citations, no claim
+    if len(re.findall(r"\w", _CITATION.sub("", answer_text))) < 3:
+        return "the answer contains only citations; write the actual answer, citing it"
     invalid = sorted({n for n in cited if not 1 <= n <= n_docs})
     if invalid:
         return f"the answer cites sources that were not retrieved: {invalid} (only {n_docs} available)"
     return None
 
 
+def _verdict_dicts(obj) -> list[dict]:
+    """Dicts carrying a "grounded" key at ANY depth (`{"verdict": {"grounded": ...}}`)."""
+    if isinstance(obj, dict):
+        own = [obj] if "grounded" in obj else []
+        return own + [d for v in obj.values() for d in _verdict_dicts(v)]
+    if isinstance(obj, list):
+        return [d for v in obj for d in _verdict_dicts(v)]
+    return []
+
+
 def _json_verdicts(text: str) -> list[dict]:
-    """Every JSON object in `text` that carries a "grounded" key.
+    """Every verdict object in `text`, top-level or nested.
 
     raw_decode from each '{' instead of one greedy regex: a greedy `\\{.*\\}` swallowed any
     later brace (`(see {ref})`), failed to parse, and silently fell back to prose.
@@ -213,25 +241,29 @@ def _json_verdicts(text: str) -> list[dict]:
         except json.JSONDecodeError:
             end = i + 1
         else:
-            if isinstance(obj, dict) and "grounded" in obj:
-                found.append(obj)
+            found += _verdict_dicts(obj)
         i = text.find("{", end)
     return found
 
 
-def _legacy_verdict(text: str) -> tuple[bool | None, str | None]:
-    """First `GROUNDED:` line (markdown-tolerant) and the `QUERY:` line, if any."""
-    verdict, query = None, None
+def _legacy_verdicts(text: str) -> tuple[list[bool], str | None]:
+    """EVERY `GROUNDED:` line (markdown-tolerant) and the `QUERY:` line, if any.
+
+    All of them, not only the first: a critic that judges claim by claim writes one verdict
+    per claim, and `GROUNDED: yes` followed by `GROUNDED: no` must not count as approval.
+    """
+    verdicts: list[bool] = []
+    query = None
     for raw in text.splitlines():
         line = _MARKUP.sub("", raw).strip()
         key, _, value = line.partition(":")
         key, value = key.strip().lower(), value.strip()
-        if key == "grounded" and verdict is None:
+        if key == "grounded":
             # exact "yes" (optionally followed by punctuation) — "yes, partially" is a no
-            verdict = re.fullmatch(r"yes[.!]?", value.lower()) is not None
+            verdicts.append(re.fullmatch(r"yes[.!]?", value.lower()) is not None)
         elif key == "query" and value not in ("", "-", "--", "—"):
             query = value
-    return verdict, query
+    return verdicts, query
 
 
 def parse_verdict(text: str) -> tuple[bool, str | None, list[str]]:
@@ -262,9 +294,8 @@ def parse_verdict(text: str) -> tuple[bool, str | None, list[str]]:
             query = q.strip()
         verdicts.append(ok)
 
-    legacy, legacy_query = _legacy_verdict(text)
-    if legacy is not None:
-        verdicts.append(legacy)
+    legacy, legacy_query = _legacy_verdicts(text)
+    verdicts += legacy
     query = query or legacy_query
 
     grounded = bool(verdicts) and all(verdicts) and not claims
@@ -292,14 +323,19 @@ def critic(state: RAGState) -> RAGState:
                 "critique": "answer was NOT_FOUND"
                             + (f" — retrying with query: {new_query}" if new_query else "")}
 
-    if state["answer"] == state.get("prev_answer"):
-        # identical answer after feedback: a deterministic model won't change it — stop
+    if (state["answer"] == state.get("prev_answer")
+            and state.get("answered_docs") == state.get("prev_answered_docs")):
+        # Same answer over the SAME evidence: a deterministic model won't change it — stop.
+        # (Same answer over NEW evidence is different: the new documents may now support
+        # it, so it goes to the Critic again.)
         return {"grounded": False, "found": True, "stalled": True, "unsupported": [],
-                "critique": "the answerer repeated a rejected answer verbatim — stopping"}
+                "draft": state["answer"],
+                "critique": "the answerer repeated a rejected answer over the same evidence — stopping"}
 
     problem = check_citations(state["answer"], len(docs))
     if problem:
         return {"grounded": False, "found": True, "unsupported": [], "feedback": problem,
+                "draft": state["answer"],
                 "critique": f"citation check failed: {problem}",
                 "query": state.get("query") or state["question"]}
 
@@ -311,24 +347,31 @@ def critic(state: RAGState) -> RAGState:
         # An empty reply is a broken critic, not missing evidence: say so, and don't burn
         # retries — asking the same model again won't fix it.
         return {"grounded": False, "found": True, "critic_error": True, "unsupported": [],
+                "draft": state["answer"],
                 "critique": "critic returned no output (e.g. a reasoning model that spent its "
                             "whole token budget thinking) — answer left unverified"}
     grounded, new_query, claims = parse_verdict(out)
+    rejected: RAGState = {} if grounded else {"draft": state["answer"]}
     feedback = "" if grounded else (
         "these claims are not supported by the context: " + "; ".join(claims) if claims
         else "the verifier found claims not supported by the context")
     return {"grounded": grounded, "found": True, "critique": out.strip(), "unsupported": claims,
-            "feedback": feedback, "query": new_query or state["question"]}
+            "feedback": feedback, "query": new_query or state["question"], **rejected}
 
 
 # --- Node 4: Finalize -------------------------------------------------------
 def finalize(state: RAGState) -> RAGState:
-    """Never hand out an answer the Critic did not approve."""
+    """Never hand out an answer the Critic did not approve.
+
+    Every rejected answer is kept in `draft` as soon as it is rejected, so a later round
+    that falls back to NOT_FOUND cannot erase it: a run that DID draft an answer ends as
+    "unverified" (exit 3), and "not found" (exit 4) is reserved for runs that never did.
+    """
     if state.get("grounded"):
-        return {}
-    if state.get("found") is False:
-        return {"answer": REFUSAL}
-    return {"draft": state.get("answer", ""), "answer": REFUSAL}
+        return {"draft": ""}
+    if state.get("draft"):
+        return {"answer": REFUSAL, "found": True}
+    return {"answer": REFUSAL, "found": False}
 
 
 # --- Routing ----------------------------------------------------------------

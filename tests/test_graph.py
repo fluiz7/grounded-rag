@@ -32,14 +32,14 @@ def test_route_stops_when_budget_exhausted():
 
 def test_critic_parses_grounded_yes(patch_pipeline, fake_store):
     patch_pipeline(["GROUNDED: yes\nQUERY: --"])
-    out = critic({"question": "q?", "documents": fake_store.docs, "answer": "a [1]"})
+    out = critic({"question": "q?", "documents": fake_store.docs, "answer": "Signal quality dominates [1]."})
     assert out["grounded"] is True
     assert out["query"] == "q?"  # unchanged when grounded
 
 
 def test_critic_parses_rewritten_query(patch_pipeline, fake_store):
     patch_pipeline(["GROUNDED: no\nQUERY: latency vs signal level"])
-    out = critic({"question": "q?", "documents": fake_store.docs, "answer": "a [2]"})
+    out = critic({"question": "q?", "documents": fake_store.docs, "answer": "Distance is a weak predictor [2]."})
     assert out["grounded"] is False
     assert out["query"] == "latency vs signal level"
 

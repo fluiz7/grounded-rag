@@ -7,12 +7,22 @@
 Exit codes: 0 verified answer · 3 answer could not be verified · 4 documents don't contain the answer.
 """
 import argparse
+import sys
 
 from .graph import build_graph
 from .ingest import ingest
 
 
+def _utf8_output() -> None:
+    """Windows consoles default to cp1252: a slide bullet (○) or a CJK draft in --verbose
+    crashed print() with UnicodeEncodeError. Write UTF-8; replace what still can't encode."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main() -> None:
+    _utf8_output()
     parser = argparse.ArgumentParser(prog="grounded-rag", description="Multi-agent RAG with a groundedness critic (local, via Ollama).")
     sub = parser.add_subparsers(dest="cmd", required=True)
 

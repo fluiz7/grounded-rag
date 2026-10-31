@@ -72,7 +72,7 @@ def test_an_answer_merely_mentioning_the_marker_is_not_a_refusal():
 def test_not_found_is_language_neutral():
     # the old fixed English sentence got translated ("Não encontrei...") and was then
     # mistaken for an answer without citations
-    assert "NOT_FOUND" in G.ANSWER_PROMPT.format(question="q", context="c", not_found=NOT_FOUND, feedback="")
+    assert "NOT_FOUND" in G.ANSWER_PROMPT.format(question="q", context="c", not_found=NOT_FOUND, feedback="", language="Portuguese")
 
 
 def test_not_found_in_round_1_rewrites_the_query_and_searches_again(patch_pipeline, fake_store):

@@ -84,3 +84,11 @@ def test_pipeline_gives_up_after_budget(patch_pipeline, fake_store):
     # the rejected text is never handed out as the answer
     assert state["answer"] == REFUSAL
     assert state["draft"] == "bad answer 3 [1]"
+
+
+def test_answer_prompt_allows_cross_lingual_support():
+    # measured: without this, qwen2.5:7b answered NOT_FOUND to Portuguese questions whose
+    # answer was in the (English) context — see PR "cross-lingual answers"
+    from src.graph import ANSWER_PROMPT
+    text = ANSWER_PROMPT.format(not_found="NOT_FOUND", feedback="", question="q", context="c")
+    assert "different language" in text and "do not answer NOT_FOUND because of the language" in text

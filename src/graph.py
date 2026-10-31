@@ -104,6 +104,9 @@ ANSWER_PROMPT = """You are a careful research assistant. Answer the QUESTION usi
 ONLY the CONTEXT below, in the same language as the QUESTION. Cite every claim inline \
 with the bracket numbers, e.g. [1], [2]. If the context does not contain the answer, \
 reply with exactly {not_found} and nothing else — no citations.
+The CONTEXT may be in a different language than the QUESTION. That is expected: a fact \
+stated in the CONTEXT in any language counts as support. Translate it into the \
+QUESTION's language and cite it; do not answer {not_found} because of the language.
 {feedback}
 QUESTION:
 {question}

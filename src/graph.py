@@ -175,7 +175,10 @@ QUESTION:
 # No lookbehind: a citation may follow a word (`quality[1]`) or another citation
 # (`[1][7]` — the second group must be checked too, or a phantom source slips through).
 _CITATION = re.compile(r"\[(\s*\d+(?:\s*[,–-]\s*\d+)*\s*)\]")
-_CODE_SPAN = re.compile(r"`[^`\n]*`")
+# Fenced blocks first (``` or ~~~, unterminated runs to the end), then inline spans:
+# otherwise the first two backticks of ```python match as an empty inline span and the
+# block's `items[99]` is read as a citation.
+_CODE_SPAN = re.compile(r"```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|`[^`\n]*`")
 _MARKUP = re.compile(r"[*_`#>]")
 
 
@@ -183,8 +186,9 @@ def cited_sources(answer_text: str) -> list[int]:
     """Source numbers cited in the text.
 
     Whether a bracket group is a citation is decided by its CONTENT, not by what precedes
-    it: source numbers start at 1 and are small, so a group containing 0 (`buffer[0]`, the
-    interval `[0, 1]`) or a 4-digit number (`[2024]`) is not a citation. Inline code is ignored.
+    it: source numbers start at 1, so a group containing 0 (`buffer[0]`, the interval
+    `[0, 1]`) is not a citation. 4-digit numbers are dropped one by one (`[2024]` is a year),
+    without hiding the rest of the group: `[99, 2024]` still cites 99. Code is ignored.
     """
     numbers: list[int] = []
     for group in _CITATION.findall(_CODE_SPAN.sub(" ", answer_text)):
@@ -195,8 +199,8 @@ def cited_sources(answer_text: str) -> list[int]:
                 flat.extend(range(bounds[0], bounds[1] + 1))
             else:
                 flat.extend(bounds)
-        if flat and all(0 < n < 1000 for n in flat):
-            numbers.extend(flat)
+        if flat and 0 not in flat:
+            numbers.extend(n for n in flat if n < 1000)
     return numbers
 
 
@@ -209,8 +213,9 @@ def check_citations(answer_text: str, n_docs: int) -> str | None:
     cited = cited_sources(answer_text)
     if not cited:
         return "the answer cites no sources"
-    # seen end-to-end from qwen2.5: an "answer" that is only `[4]` — citations, no claim
-    if len(re.findall(r"\w", _CITATION.sub("", answer_text))) < 3:
+    # seen end-to-end from qwen2.5: an "answer" that is only `[4]` — citations, no claim.
+    # One word character is enough: "No [1].", "42 [1]." and "5% [1]." are real answers.
+    if not re.search(r"\w", _CITATION.sub("", answer_text)):
         return "the answer contains only citations; write the actual answer, citing it"
     invalid = sorted({n for n in cited if not 1 <= n <= n_docs})
     if invalid:
@@ -259,8 +264,9 @@ def _legacy_verdicts(text: str) -> tuple[list[bool], str | None]:
         key, _, value = line.partition(":")
         key, value = key.strip().lower(), value.strip()
         if key == "grounded":
-            # exact "yes" (optionally followed by punctuation) — "yes, partially" is a no
-            verdicts.append(re.fullmatch(r"yes[.!]?", value.lower()) is not None)
+            # exact "yes"/"true" (optionally followed by punctuation) — "yes, partially" is
+            # a no. "true" because CRITIC_PROMPT itself asks for `"grounded": true or false`.
+            verdicts.append(re.fullmatch(r"(?:yes|true)[.!]?", value.lower()) is not None)
         elif key == "query" and value not in ("", "-", "--", "—"):
             query = value
     return verdicts, query

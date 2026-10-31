@@ -119,3 +119,20 @@ def test_language_failure_is_not_labelled_a_citation_failure(patch_pipeline):
     state = build_graph().invoke({"question": "Does distance explain the latency?"})
     assert "citation check" not in state["critique"]
     assert "pre-check failed" in state["critique"]
+
+
+# --- third review: the "exclusive words" invariant, checked instead of assumed --
+
+def test_function_word_sets_are_pairwise_disjoint():
+    from src.language import _WORDS
+    langs = list(_WORDS)
+    for i, a in enumerate(langs):
+        for b in langs[i + 1:]:
+            assert not (_WORDS[a] & _WORDS[b]), f"{a} and {b} share {_WORDS[a] & _WORDS[b]}"
+
+
+def test_repeated_das_no_longer_cancels_portuguese():
+    # "das" voted for Portuguese AND German: 5 vs 3 here failed the 2x margin (None)
+    assert detect_language("Qual é o efeito das falhas das antenas das redes?") == "Portuguese"
+    # the review's example: without "das" only "qual" is left — unsure, and never German
+    assert detect_language("Qual o impacto das falhas das redes 5G?") is None

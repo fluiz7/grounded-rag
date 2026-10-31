@@ -15,16 +15,16 @@ _SCRIPTS = ("LATIN", "CJK", "HIRAGANA", "KATAKANA", "HANGUL", "CYRILLIC", "GREEK
 
 # Function words EXCLUSIVE to one language: frequent and topic-independent. A word that
 # is a function word in two of them ("a", "as", "no", "de", "que", "se", "mais", "was",
-# "in", "an", "um", "à"…) is left out everywhere — it would vote for the wrong language
+# "in", "an", "um", "à", "das"…) is left out everywhere — it would vote for the wrong language
 # ("Does a handover…" read as Portuguese). The test suite pins the collisions.
 _FUNCTION_WORDS = {
-    "Portuguese": "os da dos das em na nas uma com não é qual quais sua seu ao pela pelo são "
+    "Portuguese": "os da dos em na nas uma com não é qual quais sua seu ao pela pelo são "
                   "também foi isso essa esse onde muito há pelos pelas quando",
     "English": "the of and to is are were what which does did how why where who with for by "
                "not that this between it be from also has have can at or its these",
     "Spanish": "el los las del y es con una qué cuál cómo lo su son también fue muy pero "
                "está hay esto cuando",
-    "German": "der die das und ist nicht mit von zu den dem ein eine wird durch auf für im "
+    "German": "der die und ist nicht mit von zu den dem ein eine wird durch auf für im "
               "sich auch wie bei werden oder zwischen nach",
     "French": "le les des du et est une qui pas pour avec sur dans quel quels aussi été ce "
               "cette sont au aux ces",

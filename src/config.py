@@ -1,13 +1,15 @@
 """Central configuration. Everything is overridable via environment variables,
 so the demo runs out-of-the-box but stays easy to tune."""
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
 class Settings:
     # Ollama (local, no API key needed)
     chat_model: str = os.getenv("RAG_CHAT_MODEL", "llama3.1")
+    # Critic model: defaults to the chat model; a different one avoids self-grading bias
+    critic_model: str = os.getenv("RAG_CRITIC_MODEL", os.getenv("RAG_CHAT_MODEL", "llama3.1"))
     embed_model: str = os.getenv("RAG_EMBED_MODEL", "nomic-embed-text")
     ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 

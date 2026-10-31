@@ -1,9 +1,7 @@
 """Unit tests for the multi-agent pipeline (no Ollama required)."""
 from langchain_core.documents import Document
-from langgraph.graph import END
 
-from src.graph import _format_context, build_graph, critic, route_after_critic
-
+from src.graph import REFUSAL, _format_context, build_graph, critic, route_after_critic
 
 # --- pure helpers -----------------------------------------------------------
 
@@ -18,7 +16,7 @@ def test_format_context_numbers_and_cites_sources():
 
 
 def test_route_stops_when_grounded():
-    assert route_after_critic({"grounded": True, "attempts": 1}) == END
+    assert route_after_critic({"grounded": True, "attempts": 1}) == "finalize"
 
 
 def test_route_retries_when_not_grounded_and_budget_left():
@@ -27,21 +25,21 @@ def test_route_retries_when_not_grounded_and_budget_left():
 
 def test_route_stops_when_budget_exhausted():
     # settings.max_retries defaults to 2 -> budget is 3 total attempts
-    assert route_after_critic({"grounded": False, "attempts": 3}) == END
+    assert route_after_critic({"grounded": False, "attempts": 3}) == "finalize"
 
 
 # --- critic parsing ---------------------------------------------------------
 
 def test_critic_parses_grounded_yes(patch_pipeline, fake_store):
     patch_pipeline(["GROUNDED: yes\nQUERY: --"])
-    out = critic({"question": "q?", "documents": fake_store.docs, "answer": "a [1]"})
+    out = critic({"question": "q?", "documents": fake_store.docs, "answer": "Signal quality dominates [1]."})
     assert out["grounded"] is True
     assert out["query"] == "q?"  # unchanged when grounded
 
 
 def test_critic_parses_rewritten_query(patch_pipeline, fake_store):
     patch_pipeline(["GROUNDED: no\nQUERY: latency vs signal level"])
-    out = critic({"question": "q?", "documents": fake_store.docs, "answer": "a"})
+    out = critic({"question": "q?", "documents": fake_store.docs, "answer": "Distance is a weak predictor [2]."})
     assert out["grounded"] is False
     assert out["query"] == "latency vs signal level"
 
@@ -62,7 +60,7 @@ def test_pipeline_happy_path_single_round(patch_pipeline, fake_store):
 
 def test_pipeline_retries_with_rewritten_query(patch_pipeline, fake_store):
     patch_pipeline([
-        "Unsupported claim.",                          # answer, round 1
+        "Unsupported claim [1].",                      # answer, round 1
         "GROUNDED: no\nQUERY: signal level impact",    # critic rejects, rewrites
         "Signal quality dominates [1].",               # answer, round 2
         "GROUNDED: yes\nQUERY: --",                    # critic approves
@@ -76,10 +74,13 @@ def test_pipeline_retries_with_rewritten_query(patch_pipeline, fake_store):
 
 def test_pipeline_gives_up_after_budget(patch_pipeline, fake_store):
     patch_pipeline([
-        "bad answer 1", "GROUNDED: no\nQUERY: try 2",
-        "bad answer 2", "GROUNDED: no\nQUERY: try 3",
-        "bad answer 3", "GROUNDED: no\nQUERY: try 4",
+        "bad answer 1 [1]", "GROUNDED: no\nQUERY: try 2",
+        "bad answer 2 [1]", "GROUNDED: no\nQUERY: try 3",
+        "bad answer 3 [1]", "GROUNDED: no\nQUERY: try 4",
     ])
     state = build_graph().invoke({"question": "q?"})
     assert state["grounded"] is False
     assert state["attempts"] == 3  # 1 initial + max_retries(2)
+    # the rejected text is never handed out as the answer
+    assert state["answer"] == REFUSAL
+    assert state["draft"] == "bad answer 3 [1]"
